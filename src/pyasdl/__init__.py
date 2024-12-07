@@ -1,6 +1,9 @@
 """A library for compiling and generating code for a dialect of Abstract Syntax Description Language (ASDL). It reads
 ASDL descriptions and writes corresponding Python class definitions.
 
+The documentation and code is heavily based on CPython's ASDL parser implementation, which lives in that repo's
+Parser/asdl.py.
+
 Notes
 -----
 The grammar being used for ASDL is based on Figure 1 of the original ASDL paper [1]_, but with extensions to support
@@ -31,6 +34,7 @@ from __future__ import annotations
 import sys
 from collections import deque
 from collections.abc import Generator, Iterable, Iterator
+from enum import Enum, auto
 from io import StringIO
 
 
@@ -80,15 +84,12 @@ if TYPE_CHECKING:
         from typing_extensions import TypeAlias
 else:
     Any = _PlaceholderMeta.for_typing_name("Any")
-    Union = _PlaceholderGenericMeta.for_typing_name("Union")
     Optional = _PlaceholderGenericMeta.for_typing_name("Optional")
+    Union = _PlaceholderGenericMeta.for_typing_name("Union")
     TypeAlias = _PlaceholderMeta.for_typing_name("TypeAlias")
 
 
 # endregion
-
-
-_ASTGen: TypeAlias = Generator["AST", Any, Any]
 
 
 # ============================================================================
@@ -116,68 +117,47 @@ class ASDLSyntaxError(Exception):
 # ============================================================================
 
 
-# enum.Enum is expensive in terms of import time and class instantation time, so we simulate it.
-
-
-class _Kind:
-    __slots__ = ("value", "name", "owner_name")
-
-    def __init__(self, value: int):
-        self.value = value
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        self.name = name
-        self.owner_name = owner.__name__
-
-    def __eq__(self, other: object, /) -> bool:
-        if not isinstance(other, self.__class__):
-            return NotImplemented
-        return self.value == other.value
-
-    def __repr__(self):
-        return f"<{self.owner_name}.{self.name}: {self.value}>"
-
-
-class TokenKind:
+class TokenKind(Enum):
     """The kinds of tokens that an ASDL specification can contain."""
 
     # fmt: off
-    CONSTRUCTOR_ID  = _Kind(1)
-    TYPE_ID         = _Kind(2)
-    EQUALS          = _Kind(3)
-    COMMA           = _Kind(4)
-    QUESTION        = _Kind(5)
-    PIPE            = _Kind(6)
-    ASTERISK        = _Kind(7)
-    LPAREN          = _Kind(8)
-    RPAREN          = _Kind(9)
-    LBRACE          = _Kind(10)
-    RBRACE          = _Kind(11)
+    CONSTRUCTOR_ID  = auto()
+    TYPE_ID         = auto()
+    EQUALS          = auto()
+    COMMA           = auto()
+    QUESTION        = auto()
+    PIPE            = auto()
+    ASTERISK        = auto()
+    LPAREN          = auto()
+    RPAREN          = auto()
+    LBRACE          = auto()
+    RBRACE          = auto()
     # fmt: on
 
-    OPERATOR_TABLE = {  # noqa: RUF012
-        "=": EQUALS,
-        ",": COMMA,
-        "?": QUESTION,
-        "|": PIPE,
-        "(": LPAREN,
-        ")": RPAREN,
-        "*": ASTERISK,
-        "{": LBRACE,
-        "}": RBRACE,
-    }
+
+OPERATOR_TABLE = {
+    "=": TokenKind.EQUALS,
+    ",": TokenKind.COMMA,
+    "?": TokenKind.QUESTION,
+    "|": TokenKind.PIPE,
+    "(": TokenKind.LPAREN,
+    ")": TokenKind.RPAREN,
+    "*": TokenKind.ASTERISK,
+    "{": TokenKind.LBRACE,
+    "}": TokenKind.RBRACE,
+}
 
 
 class Token:
     __slots__ = ("kind", "value", "lineno")
 
-    def __init__(self, kind: _Kind, value: str, lineno: int):
+    def __init__(self, kind: TokenKind, value: str, lineno: int):
         self.kind = kind
         self.value = value
         self.lineno = lineno
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(kind={self.kind}, value={self.value!r}, lineno={self.lineno})"
+        return f"{self.__class__.__name__}(kind={self.kind!r}, value={self.value!r}, lineno={self.lineno})"
 
 
 def tokenize(source: str) -> Generator[Token]:
@@ -189,16 +169,16 @@ def tokenize(source: str) -> Generator[Token]:
         while col_no < len(line):
             char = line[col_no]
 
-            # Whitespace: Discard.
+            # Discard whitespace.
             if char.isspace():
                 col_no += 1
 
-            # Identifier: Capture.
+            # Capture identifiers.
             elif char.isalpha():
                 id_start = col_no
                 col_no += 1
 
-                # Find the end of the identifier.
+                # Find the end of the identifier. Default to the end of the line.
                 for idx in range(id_start + 1, len(line)):
                     if not (line[idx].isalpha() or line[idx] == "_"):
                         col_no = idx
@@ -213,17 +193,17 @@ def tokenize(source: str) -> Generator[Token]:
 
                 yield Token(id_kind, line[id_start:col_no], line_no)
 
-            # Comment: Discard the rest of the line.
+            # Discard the line from the comment onwards.
             elif line.startswith("--", col_no):
                 break
 
-            # Operator: Capture.
-            elif (op_kind := TokenKind.OPERATOR_TABLE.get(char)) is not None:
+            # Capture operators.
+            elif (op_kind := OPERATOR_TABLE.get(char)) is not None:
                 # Operators can only be 1 character long.
                 col_no += 1
                 yield Token(op_kind, char, line_no)
 
-            # Unknown: Panic.
+            # Panic if we encounter something unknown.
             else:
                 msg = f"Invalid operator {char}"
                 raise ASDLSyntaxError(msg, line_no)
@@ -242,6 +222,11 @@ def tokenize(source: str) -> Generator[Token]:
 # simple AST to represent them. See the EBNF at the top of the file to
 # understand the logical connection between the various node types.
 # ============================================================================
+
+
+class FieldQuantifier(Enum):
+    SEQ = auto()
+    OPT = auto()
 
 
 class AST:
@@ -290,18 +275,17 @@ class Constructor(AST):
 
 
 class Field(AST):
-    __match_args__ = __slots__ = _fields = ("type", "name", "seq", "opt")
+    __match_args__ = __slots__ = _fields = ("type", "name", "quantifier")
 
-    def __init__(self, type: str, name: Optional[str] = None, seq: Optional[bool] = False, opt: Optional[bool] = False):  # noqa: A002
+    def __init__(self, type: str, name: Optional[str] = None, quantifier: Optional[FieldQuantifier] = None):  # noqa: A002
         self.type = type
         self.name = name
-        self.seq = seq
-        self.opt = opt
+        self.quantifier = quantifier
 
     def __str__(self):
-        if self.seq:
+        if self.quantifier is FieldQuantifier.SEQ:
             extra = "*"
-        elif self.opt:
+        elif self.quantifier is FieldQuantifier.OPT:
             extra = "?"
         else:
             extra = ""
@@ -426,7 +410,7 @@ class ASDLParser:
         self.cur_token = next(self._tokenizer, None)
         return cur_val
 
-    def _match(self, kind: Union[_Kind, tuple[_Kind, ...]]) -> str:
+    def _match(self, kind: Union[TokenKind, tuple[TokenKind, ...]]) -> str:
         """The 'match' primitive of RD parsers.
 
         *   Verifies that the current token is of the given kind (kind can be a tuple, in which the kind must match one
@@ -497,40 +481,43 @@ class ASDLParser:
     def parse_fields(self) -> list[Field]:
         fields: list[Field] = []
         self._match(TokenKind.LPAREN)
+
         while self.cur_token.kind is TokenKind.TYPE_ID:
             typename = self._advance()
-            is_seq, is_opt = self.parse_optional_field_quantifier()
+            field_quantifier = self.parse_optional_field_quantifier()
             id_ = self._advance() if self.cur_token.kind in self._id_kinds else None
-            fields.append(Field(typename, id_, seq=is_seq, opt=is_opt))
+            fields.append(Field(typename, id_, field_quantifier))
             if self.cur_token.kind is TokenKind.RPAREN:
                 break
             elif self.cur_token.kind is TokenKind.COMMA:
                 self._advance()
+
         self._match(TokenKind.RPAREN)
         return fields
 
-    def parse_optional_fields(self) -> Optional[list[Field]]:
+    def parse_optional_fields(self) -> list[Field]:
         if self.cur_token.kind is TokenKind.LPAREN:
             return self.parse_fields()
         else:
-            return None
+            return []
 
-    def parse_optional_attributes(self) -> Optional[list[Field]]:
+    def parse_optional_attributes(self) -> list[Field]:
         if self._at_keyword("attributes"):
             self._advance()
             return self.parse_fields()
         else:
-            return None
+            return []
 
-    def parse_optional_field_quantifier(self) -> tuple[bool, bool]:
-        is_seq, is_opt = False, False
+    def parse_optional_field_quantifier(self) -> Optional[FieldQuantifier]:
         if self.cur_token.kind is TokenKind.ASTERISK:
-            is_seq = True
+            quantifier = FieldQuantifier.SEQ
             self._advance()
         elif self.cur_token.kind is TokenKind.QUESTION:
-            is_opt = True
+            quantifier = FieldQuantifier.OPT
             self._advance()
-        return is_seq, is_opt
+        else:
+            quantifier = None
+        return quantifier
 
     # endregion
 
@@ -553,6 +540,8 @@ def parse(source: str) -> Module:
 # ============================================================================
 
 
+_ASTGen: TypeAlias = Generator["AST", Any, Any]
+
 ASDL_TYPE_TO_PYTHON_TYPE = {
     "identifier": "str",
     "string": "str",
@@ -569,35 +558,35 @@ class Checker(NodeVisitor):
     constructors: dict[str, str]
     types: dict[str, list[str]]
     error_messages: list[str]
-    current_type_name: str
+    parent_type_name: str
 
     def __init__(self):
         super().__init__()
         self.constructors = {}
         self.types = {}
         self.error_messages = []
-        self.current_type_name = ""
+        self.parent_type_name = ""
 
     def visit_Type(self, node: Type) -> _ASTGen:
-        self.current_type_name = str(node.name)
+        self.parent_type_name = str(node.name)
         return self.generic_visit(node)
 
     def visit_Constructor(self, node: Constructor) -> _ASTGen:
-        parent_name = self.current_type_name
-        self.current_type_name = str(node.name)
+        parent_name = self.parent_type_name
+        self.parent_type_name = str(node.name)
 
         try:
-            conflict = self.constructors[self.current_type_name]
+            conflict = self.constructors[self.parent_type_name]
         except KeyError:
-            self.constructors[self.current_type_name] = parent_name
+            self.constructors[self.parent_type_name] = parent_name
         else:
-            self.error_messages.append(f"Redefinition of constructor {self.current_type_name}")
+            self.error_messages.append(f"Redefinition of constructor {self.parent_type_name}")
             self.error_messages.append(f"Defined in {conflict} and {parent_name}")
 
         return self.generic_visit(node)
 
     def visit_Field(self, field: Field) -> None:
-        self.types.setdefault(str(field.type), []).append(self.current_type_name)
+        self.types.setdefault(str(field.type), []).append(self.parent_type_name)
 
 
 def check_tree(mod: Module) -> None:
@@ -613,6 +602,7 @@ def check_tree(mod: Module) -> None:
     checker.visit(mod)
 
     error_messages = checker.error_messages
+
     module_types = {type_.name for type_ in mod.dfns}
     expected_types = ASDL_TYPES | module_types
 
@@ -680,17 +670,13 @@ class PythonCodeGenerator(NodeVisitor):
         param_name = f"{field.name}: "
         param_annotation = ASDL_TYPE_TO_PYTHON_TYPE.get(field.type, field.type)
 
-        param_default = ""
-
-        if field.seq:
+        if field.quantifier is FieldQuantifier.SEQ:
             param_annotation = f"list[{param_annotation}]"
-            param_default = " = ..."
 
-        if field.opt:
+        elif field.quantifier is FieldQuantifier.OPT:
             param_annotation = f"Optional[{param_annotation}]"
-            param_default = " = None"
 
-        return "".join((param_name, param_annotation, param_default))
+        return "".join((param_name, param_annotation))
 
     def visit_Sum(self, node: Sum) -> _ASTGen:
         init_params = ["self"]
@@ -702,9 +688,7 @@ class PythonCodeGenerator(NodeVisitor):
 
             for attr in node.attributes:
                 attribute_init_params.append(self._build_init_param_from_field(attr))
-
-                seq_default = "" if not attr.seq else f" if ({attr.name} is not ...) else []"
-                attribute_init_body.append(f"self.{attr.name} = {attr.name}{seq_default}")
+                attribute_init_body.append(f"self.{attr.name} = {attr.name}")
 
             init_params.extend(attribute_init_params)
             init_body.extend(attribute_init_body)
@@ -747,9 +731,7 @@ class PythonCodeGenerator(NodeVisitor):
             for field in node.fields:
                 match_args_and_field_names.append(repr(field.name))
                 init_params.append(self._build_init_param_from_field(field))
-
-                seq_default = "" if not field.seq else f" if ({field.name} is not ...) else []"
-                init_body.append(f"self.{field.name} = {field.name}{seq_default}")
+                init_body.append(f"self.{field.name} = {field.name}")
 
         if node.attributes:
             attribute_init_params = ["*"]
@@ -757,9 +739,7 @@ class PythonCodeGenerator(NodeVisitor):
 
             for attr in node.attributes:
                 attribute_init_params.append(self._build_init_param_from_field(attr))
-
-                seq_default = "" if not attr.seq else f" if ({attr.name} is not ...) else []"
-                attribute_init_body.append(f"self.{attr.name} = {attr.name}{seq_default}")
+                attribute_init_body.append(f"self.{attr.name} = {attr.name}")
 
             init_params.extend(attribute_init_params)
             init_body.extend(attribute_init_body)
@@ -805,7 +785,7 @@ class PythonCodeGenerator(NodeVisitor):
                 match_args_and_field_names.append(repr(field.name))
                 init_params.append(self._build_init_param_from_field(field))
 
-                seq_default = "" if not field.seq else f" if ({field.name} is not ...) else []"
+                seq_default = ""  # if not field.seq else f" if ({field.name} is not ...) else []"
                 init_body.append(f"self.{field.name} = {field.name}{seq_default}")
 
         if self.parent_type_attributes:
