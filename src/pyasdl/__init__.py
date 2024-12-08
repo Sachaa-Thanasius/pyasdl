@@ -1,14 +1,14 @@
 """A library for compiling and generating code for a dialect of Abstract Syntax Description Language (ASDL). It reads
 ASDL descriptions and writes corresponding Python class definitions.
 
-The documentation and code is heavily based on CPython's ASDL parser implementation, which lives in that repo's
-Parser/asdl.py.
+Much of the documentation and code is copied from or heavily based on CPython's ASDL parser implementation [1]_.
 
 Notes
 -----
-The grammar being used for ASDL is based on Figure 1 of the original ASDL paper [1]_, but with extensions to support
-modules and attributes after a product. Words starting with capital letters are terminals. Literal tokens are in
-"double quotes". Others are non-terminals.
+The grammar being used for parsing ASDL is based on Figure 1 of the original ASDL paper [2]_, but with extensions to
+support a) modules and b) attributes after a product.
+
+Words starting with capital letters are terminals. Literal tokens are in "double quotes". Others are non-terminals.
 
 ..  code-block:: ebnf
 
@@ -24,7 +24,8 @@ modules and attributes after a product. Words starting with capital letters are 
 
 References
 ----------
-..  [1] Wang, D. C., Appel, A. W., Korn, J. L., & Serra, C. S. (1997). The Zephyr abstract syntax description
+..  [1] https://github.com/python/cpython/blob/3.13/Parser/asdl.py
+..  [2] Wang, D. C., Appel, A. W., Korn, J. L., & Serra, C. S. (1997). The Zephyr abstract syntax description
     language. In Proceedings of the conference on domain-specific languages, October 15-17, 1997, Santa Barbara,
     California (pp. 213-227). Usenix Association.
 """
@@ -36,60 +37,21 @@ from collections import deque
 from collections.abc import Generator, Iterable, Iterator
 from enum import Enum, auto
 from io import StringIO
+from types import GeneratorType
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 
-TYPE_CHECKING = False
-
-
-# ============================================================================
-# region -------- Annotation and typing-related shims --------
-# ============================================================================
-
-
-# types can be an expensive module.
-if TYPE_CHECKING:
-    from types import GeneratorType, GenericAlias
+# Use a shim to avoid a runtime dependency on typing-extensions.
+if sys.version_info >= (3, 10):
+    from typing import TypeAlias
+elif TYPE_CHECKING:
+    from typing_extensions import TypeAlias
 else:
-    GeneratorType = type(_ for _ in ())
-    GenericAlias = type(list[int])
 
+    class TypeAlias:
+        """Placeholder for ``typing.TypeAlias``."""
 
-class _PlaceholderGenericAlias(GenericAlias):
-    def __repr__(self) -> str:
-        name = f'typing.{super().__repr__().rpartition(".")[2]}'
-        return f"<import placeholder for {name}>"
-
-
-class _PlaceholderMeta(type):
-    def __repr__(self) -> str:
-        return f"<import placeholder for typing.{self.__name__}>"
-
-    @classmethod
-    def for_typing_name(cls, name: str):  # noqa: ANN206
-        doc = f"Placeholder for typing.{name}."
-        return cls(name, (), {"__doc__": doc})
-
-
-class _PlaceholderGenericMeta(_PlaceholderMeta):
-    def __getitem__(self, item: object) -> _PlaceholderGenericAlias:
-        return _PlaceholderGenericAlias(self, item)
-
-
-if TYPE_CHECKING:
-    from typing import Any, Optional, Union
-
-    if sys.version_info >= (3, 10):
-        from typing import TypeAlias
-    else:
-        from typing_extensions import TypeAlias
-else:
-    Any = _PlaceholderMeta.for_typing_name("Any")
-    Optional = _PlaceholderGenericMeta.for_typing_name("Optional")
-    Union = _PlaceholderGenericMeta.for_typing_name("Union")
-    TypeAlias = _PlaceholderMeta.for_typing_name("TypeAlias")
-
-
-# endregion
+        __module__ = "typing"
 
 
 # ============================================================================
@@ -135,7 +97,7 @@ class TokenKind(Enum):
     # fmt: on
 
 
-OPERATOR_TABLE = {
+OPERATOR_TOKEN_TABLE = {
     "=": TokenKind.EQUALS,
     ",": TokenKind.COMMA,
     "?": TokenKind.QUESTION,
@@ -161,7 +123,18 @@ class Token:
 
 
 def tokenize(source: str) -> Generator[Token]:
-    """Tokenize the given buffer. Yield Token objects."""
+    """Tokenize a source.
+
+    Yields
+    ------
+    Token
+        An token representation, which holds the token kind, value, and line number.
+
+    Raises
+    ------
+    ASDLSyntaxError
+        If something unknown is encountered during tokenization.
+    """
 
     for line_no, line in enumerate(source.splitlines(), start=1):
         col_no = 0
@@ -198,7 +171,7 @@ def tokenize(source: str) -> Generator[Token]:
                 break
 
             # Capture operators.
-            elif (op_kind := OPERATOR_TABLE.get(char)) is not None:
+            elif (op_kind := OPERATOR_TOKEN_TABLE.get(char)) is not None:
                 # Operators can only be 1 character long.
                 col_no += 1
                 yield Token(op_kind, char, line_no)
@@ -277,7 +250,12 @@ class Constructor(AST):
 class Field(AST):
     __match_args__ = __slots__ = _fields = ("type", "name", "quantifier")
 
-    def __init__(self, type: str, name: Optional[str] = None, quantifier: Optional[FieldQuantifier] = None):  # noqa: A002
+    def __init__(
+        self,
+        type: str,  # noqa: A002
+        name: Optional[str] = None,
+        quantifier: Optional[FieldQuantifier] = None,
+    ):
         self.type = type
         self.name = name
         self.quantifier = quantifier
@@ -332,7 +310,12 @@ def walk(node: AST) -> Generator[AST]:
 
 
 class NodeVisitor:
-    """Generic tree visitor for the meta-AST that describes ASDL. This can be used by emitters."""
+    """Generic tree visitor for the meta-AST that describes ASDL.
+
+    Notes
+    -----
+    The generator-based implemention is based on a talk by David Beazley called "Generators: The Final Frontier".
+    """
 
     def _visit(self, node: AST) -> Generator[Any, Any, Any]:
         """Wrapper for visit methods to ensure visit() only deals with generators."""
@@ -355,11 +338,10 @@ class NodeVisitor:
                     node = stack[-1].throw(exception)
                 else:
                     node = stack[-1].send(result)
-            except StopIteration as exc:  # noqa: PERF203
+            except StopIteration as exc:  # noqa: PERF203 # This loop cannot avoid exceptions as control flow.
                 stack.pop()
                 result = exc.value
-            except BaseException as exc:  # noqa: BLE001
-                # Manually propogate the exception up the stack of generators.
+            except BaseException as exc:  # noqa: BLE001 # The exception is propogated.
                 stack.pop()
                 exception = exc
             else:
@@ -427,7 +409,7 @@ class ASDLParser:
         *   Reads in the next token
         """
 
-        if (isinstance(kind, tuple) and self.cur_token.kind in kind) or self.cur_token.kind == kind:
+        if (isinstance(kind, tuple) and self.cur_token.kind in kind) or self.cur_token.kind is kind:
             value = self.cur_token.value
             self._advance()
             return value
@@ -436,6 +418,11 @@ class ASDLParser:
             raise ASDLSyntaxError(msg, self.cur_token.lineno)
 
     def _at_keyword(self, keyword: str) -> bool:
+        """Check if the current token is an identifier and matches the given keyword.
+
+        It does not advance to the next token.
+        """
+
         return self.cur_token.kind == TokenKind.TYPE_ID and self.cur_token.value == keyword
 
     # endregion
@@ -474,16 +461,20 @@ class ASDLParser:
 
     def parse_type(self) -> Union[Product, Sum]:
         if self.cur_token.kind is TokenKind.LPAREN:
-            # If we see a (, it's a product
+            # If we see a "(", it's a product
             return self.parse_product()
         else:
-            # Otherwise it's a sum. Look for ConstructorId
-            sumlist = [Constructor(self._match(TokenKind.CONSTRUCTOR_ID), self.parse_optional_fields())]
-            while self.cur_token.kind is TokenKind.PIPE:
-                # More constructors
-                self._advance()
-                sumlist.append(Constructor(self._match(TokenKind.CONSTRUCTOR_ID), self.parse_optional_fields()))
-            return Sum(sumlist, self.parse_optional_attributes())
+            # Otherwise, it's a sum.
+            return self.parse_sum()
+
+    def parse_sum(self) -> Sum:
+        # Look for ConstructorId.
+        sumlist = [Constructor(self._match(TokenKind.CONSTRUCTOR_ID), self.parse_optional_fields())]
+        while self.cur_token.kind is TokenKind.PIPE:
+            # More constructors
+            self._advance()
+            sumlist.append(Constructor(self._match(TokenKind.CONSTRUCTOR_ID), self.parse_optional_fields()))
+        return Sum(sumlist, self.parse_optional_attributes())
 
     def parse_product(self) -> Product:
         return Product(self.parse_fields(), self.parse_optional_attributes())
@@ -545,7 +536,7 @@ def parse(source: str) -> Module:
 # ============================================================================
 
 
-_ASTGen: TypeAlias = Generator["AST", Any, Any]
+_ASTGen: TypeAlias = Generator[AST, Any, Any]
 
 ASDL_TYPE_TO_PYTHON_TYPE = {
     "identifier": "str",
@@ -573,12 +564,12 @@ class Checker(NodeVisitor):
         self.parent_type_name = ""
 
     def visit_Type(self, node: Type) -> _ASTGen:
-        self.parent_type_name = str(node.name)
+        self.parent_type_name = node.name
         return self.generic_visit(node)
 
     def visit_Constructor(self, node: Constructor) -> _ASTGen:
         parent_name = self.parent_type_name
-        self.parent_type_name = str(node.name)
+        self.parent_type_name = node.name
 
         try:
             conflict = self.constructors[self.parent_type_name]
@@ -591,7 +582,7 @@ class Checker(NodeVisitor):
         return self.generic_visit(node)
 
     def visit_Field(self, field: Field) -> None:
-        self.types.setdefault(str(field.type), []).append(self.parent_type_name)
+        self.types.setdefault(field.type, []).append(self.parent_type_name)
 
 
 def check_tree(mod: Module) -> None:
@@ -600,7 +591,7 @@ def check_tree(mod: Module) -> None:
     Raises
     ------
     ASDLSyntaxError
-        If the tree is incorrect.
+        If the tree has any type name conflicts or undefined types.
     """
 
     checker = Checker()
@@ -629,7 +620,9 @@ class _AttributeStatements:
 
 
 class PythonCodeGenerator(NodeVisitor):
-    """Visitor that emits Python code based on the given AST into"""
+    """Visitor that generates Python code based on the given AST into an internal string buffer."""
+
+    # NOTE: The calls to self.write might incur unnecessary overhead, but no benchmarking has been done yet.
 
     def __init__(self):
         self.buffer = StringIO()
@@ -640,28 +633,57 @@ class PythonCodeGenerator(NodeVisitor):
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc_info: object):
+    def __exit__(self, *_exc_info: object):
         self.buffer.close()
 
-    def write(self, s: str, /) -> None:
-        self.buffer.write(s)
+    def write(self, s: str = "", /, *, end: str = "\n") -> None:
+        """Write a string to the internal buffer.
+
+        Parameters
+        ----------
+        s: str, default=""
+            The string to write. Defaults to the empty string.
+        end: str, default="\\n"
+            What should be added to the end of the given string. Defaults to a newline.
+        """
+
+        self.buffer.write(f"{s}{end}")
+
+    def writelines(self, *lines: str, end: str = "\n") -> None:
+        """Write multiple strings to the internal buffer.
+
+        Parameters
+        ----------
+        end: str, default="\\n"
+            What should be added to the end of each string. Defaults to a newline.
+        """
+
+        self.buffer.writelines(f"{line}{end}" for line in lines)
 
     def get_value(self) -> str:
+        """Get the generated code."""
+
         return self.buffer.getvalue()
 
     def visit(self, node: AST) -> Any:
-        # Construct the import statements and base class first.
+        """Construct the import statements and base class before starting the regular tree traversal."""
 
-        self.write(
-            "from __future__ import annotations\n"
-            "\n"
-            "from typing import Optional\n"
-            "\n"
-            "\n"
-            "class AST:\n"
-            "    __match_args__ = ()\n"
-            "    _fields = ()\n"
-            "\n"
+        # Imports
+        self.writelines(
+            "from __future__ import annotations",
+            "",
+            "from typing import Optional",
+            "",
+            "",
+        )
+
+        # Base class
+        self.writelines(
+            "class AST:",
+            "    __match_args__ = ()",
+            "    _fields = ()",
+            "",
+            "",
         )
 
         return super().visit(node)
@@ -702,27 +724,25 @@ class PythonCodeGenerator(NodeVisitor):
         else:
             saved_attributes = None
 
+        # Construct the sum class.
+        self.writelines(
+            f"class {self.parent_type_name}(AST):",
+            "    __match_args__ = ()",
+            "    _fields = ()",
+            "",
+        )
+
         # Only construct an __init__ if it's going to do something.
         if len(init_params) > 1 or init_body:
             sig = ", ".join(init_params)
-            body = "\n        ".join(init_body)
+            self.write(f"    def __init__({sig}) -> None:")
 
-            init_source = (
-                f"    def __init__({sig}) -> None:\n"
-                f"        {body}\n"
-            )  # fmt: skip
+            for body_stmt in init_body:
+                self.write(f"        {body_stmt}")
 
-        else:
-            init_source = ""
+            self.write()
 
-        # Construct the sum class.
-        self.write(
-            f"class {self.parent_type_name}(AST):\n"
-            "    __match_args__ = ()\n"
-            "    _fields = ()\n"
-            "\n"
-            f"{init_source}\n"
-        )
+        self.write()
 
         self.parent_type_attributes = saved_attributes
         return self.generic_visit(node)
@@ -753,29 +773,27 @@ class PythonCodeGenerator(NodeVisitor):
         else:
             saved_attributes = None
 
-        # Only construct an __init__ if it's going to do something.
-        if len(init_params) > 1 or init_body:
-            sig = ", ".join(init_params)
-            body = "\n        ".join(init_body)
-
-            init_source = (
-                f"    def __init__({sig}) -> None:\n"
-                f"        {body}\n"
-            )  # fmt: skip
-
-        else:
-            init_source = ""
-
         match_args_and_fields = ", ".join(match_args_and_field_names)
 
         # Construct the product class.
-        self.write(
-            f"class {self.parent_type_name}(AST):\n"
-            f"    __match_args__ = ({match_args_and_fields})\n"
-            f"    _fields = ({match_args_and_fields})\n"
-            "\n"
-            f"{init_source}\n"
+        self.writelines(
+            f"class {self.parent_type_name}(AST):",
+            f"    __match_args__ = ({match_args_and_fields})",
+            f"    _fields = ({match_args_and_fields})",
+            "",
         )
+
+        # Only construct an __init__ if it's going to do something.
+        if len(init_params) > 1 or init_body:
+            sig = ", ".join(init_params)
+            self.write(f"    def __init__({sig}) -> None:")
+
+            for body_stmt in init_body:
+                self.write(f"        {body_stmt}")
+
+            self.write()
+
+        self.write()
 
         self.parent_type_attributes = saved_attributes
         return self.generic_visit(node)
@@ -789,39 +807,38 @@ class PythonCodeGenerator(NodeVisitor):
             for field in node.fields:
                 match_args_and_field_names.append(repr(field.name))
                 init_params.append(self._build_init_param_from_field(field))
-
-                seq_default = ""  # if not field.seq else f" if ({field.name} is not ...) else []"
-                init_body.append(f"self.{field.name} = {field.name}{seq_default}")
+                init_body.append(f"self.{field.name} = {field.name}")
 
         if self.parent_type_attributes:
             init_params.extend(self.parent_type_attributes.init_params)
             init_body.extend(self.parent_type_attributes.init_body_stmts)
 
+        match_args_and_fields = ", ".join(match_args_and_field_names)
+
+        # Construct the concrete class.
+        self.writelines(
+            f"class {node.name}({self.parent_type_name}):",
+            f"    __match_args__ = ({match_args_and_fields})",
+            f"    _fields = ({match_args_and_fields})",
+            "",
+        )
+
         # Only construct an __init__ if it's going to do something.
         if len(init_params) > 1 or init_body:
             sig = ", ".join(init_params)
-            body = "\n        ".join(init_body)
+            self.write(f"    def __init__({sig}) -> None:")
 
-            init_source = (
-                f"    def __init__({sig}) -> None:\n"
-                f"        {body}\n"
-            )  # fmt: skip
+            for body_stmt in init_body:
+                self.write(f"        {body_stmt}")
 
-        else:
-            init_source = ""
+            self.write()
 
-        match_args_and_fields = ", ".join(match_args_and_field_names)
-
-        self.write(
-            f"class {node.name}({self.parent_type_name}):\n"
-            f"    __match_args__ = ({match_args_and_fields})\n"
-            f"    _fields = ({match_args_and_fields})\n"
-            "\n"
-            f"{init_source}\n"
-        )
+        self.write()
 
 
 def generate_code(source: str) -> str:
+    """Generate Python code based on the given ASDL description."""
+
     tree = parse(source)
     check_tree(tree)
 

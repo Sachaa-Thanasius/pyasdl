@@ -12,24 +12,6 @@ readme = { file = "README.rst", content-type = "text/x-rst" }
 authors = [{ name = "Sachaa-Thanasius", email = "sachaathanasius@gmail.com" }]
 
 
-# -------- Test config
-
-[tool.pytest.ini_options]
-pythonpath = "src"
-addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config"]
-
-[tool.coverage.paths]
-pyasdl = ["src"]
-
-[tool.coverage.run]
-plugins = ["covdefaults"]
-source = ["pyasdl", "tests"]
-
-[tool.coverage.report]
-fail_under = 90
-exclude_lines = ["^\\s*(?:el)?if TYPE_CHECKING:$"]
-
-
 # -------- Linter config
 
 [tool.ruff]
@@ -47,7 +29,6 @@ select = [
     "ASYNC",
     "S",
     "BLE",
-    # "FBT",
     "B",
     "A",
     "COM",
@@ -118,20 +99,11 @@ combine-as-imports = true
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true
 
-[tool.ruff.lint.per-file-ignores]
-# ---- Test code
-"tests/**/test_*.py" = [
-    "T201",   # Printing is fine.
-    "T203",   # Pretty-printing is fine.
-    "ANN201", # Don't need return annotations in tests.
-    "ANN202", # Don't need return annotations in tests.
-]
-
 
 # -------- Type-checker config
 
 [tool.pyright]
-include = ["src/pyasdl", "tests"]
+include = ["src/pyasdl"]
 pythonVersion = "3.9"
 pythonPlatform = "All"
 typeCheckingMode = "strict"
