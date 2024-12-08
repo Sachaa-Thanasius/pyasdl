@@ -368,6 +368,8 @@ class NodeVisitor:
 #
 # A parser for ASDL definition files. It reads in an ASDL description and
 # parses it into an AST that describes it.
+#
+# TODO: For fun, make this iterative with generators instead of recursive.
 # ============================================================================
 
 
