@@ -215,12 +215,12 @@ def tokenize(source: str) -> Generator[Token]:
 # ============================================================================
 # region -------- Meta-AST --------
 #
-# The following classes define nodes into which the ASDL description is
-# parsed. Note: this is a "meta-AST". ASDL files (such as Python.asdl)
-# describe the AST structure used by a programming language. But ASDL files
-# themselves need to be parsed. This module parses ASDL files and uses a
-# simple AST to represent them. See the EBNF at the top of the file to
-# understand the logical connection between the various node types.
+# Node classes into which the ASDL description is parsed. Note: this is a
+# "meta-AST". ASDL files (such as Python.asdl) describe the AST structure used
+# by a programming language. But ASDL files themselves need to be parsed. This
+# module parses ASDL files and uses a simple AST to represent them. See the
+# EBNF at the top of the file to understand the logical connection between the
+# various node types.
 # ============================================================================
 
 
@@ -298,6 +298,8 @@ class Field(AST):
 
 # ============================================================================
 # region -------- Meta-AST helpers --------
+#
+# Helper functions and classes for operating on the meta-AST nodes.
 # ============================================================================
 
 
@@ -387,6 +389,12 @@ class NodeVisitor:
 # ============================================================================
 
 
+TOKEN_TO_FIELD_QUANTIFIER = {
+    TokenKind.ASTERISK: FieldQuantifier.SEQ,
+    TokenKind.QUESTION: FieldQuantifier.OPT,
+}
+
+
 class ASDLParser:
     """Parser for ASDL files.
 
@@ -455,11 +463,13 @@ class ASDLParser:
 
     def parse_definitions(self) -> list[Type]:
         defs: list[Type] = []
+
         while self.cur_token.kind is TokenKind.TYPE_ID:
             typename = self._advance()
             self._match(TokenKind.EQUALS)
             type_ = self.parse_type()
             defs.append(Type(typename, type_))
+
         return defs
 
     def parse_type(self) -> Union[Product, Sum]:
@@ -509,14 +519,9 @@ class ASDLParser:
             return []
 
     def parse_optional_field_quantifier(self) -> Optional[FieldQuantifier]:
-        if self.cur_token.kind is TokenKind.ASTERISK:
-            quantifier = FieldQuantifier.SEQ
+        quantifier = TOKEN_TO_FIELD_QUANTIFIER.get(self.cur_token.kind)
+        if quantifier is not None:
             self._advance()
-        elif self.cur_token.kind is TokenKind.QUESTION:
-            quantifier = FieldQuantifier.OPT
-            self._advance()
-        else:
-            quantifier = None
         return quantifier
 
     # endregion
@@ -535,8 +540,8 @@ def parse(source: str) -> Module:
 # ============================================================================
 # region -------- Code generator --------
 #
-# Machinery for generating Python code from a parse tree representing an ASDL
-# description.
+# A generator that takes in a parse tree representing an ASDL description and
+# outputs Python code.
 # ============================================================================
 
 
