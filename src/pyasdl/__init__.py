@@ -6,21 +6,21 @@ Much of the documentation and code is copied from or heavily based on CPython's 
 Notes
 -----
 The grammar being used for parsing ASDL is based on Figure 1 of the original ASDL paper [2]_, but with extensions to
-support a) modules and b) attributes after a product.
+support a) a module that encapsulates the definitions, and b) attributes after a product.
 
 Words starting with capital letters are terminals. Literal tokens are in "double quotes". Others are non-terminals.
 
 ..  code-block:: ebnf
 
-    module        = "module" id "{" [definitions] "}"
-    definitions   = { TypeId "=" type }
-    type          = product | sum
-    product       = fields ["attributes" fields]
-    sum           = constructor { "|" constructor } ["attributes" fields]
-    constructor   = ConstructorId [fields]
-    fields        = "(" { field, "," } field ")"
-    field         = TypeId ["?" | "*"] [id]
-    id            = TypeId | ConstructorId
+    module        ::= "module" id "{" [definitions] "}"
+    definitions   ::= { TypeId "=" type }
+    type          ::= product | sum
+    product       ::= fields ["attributes" fields]
+    sum           ::= constructor { "|" constructor } ["attributes" fields]
+    constructor   ::= ConstructorId [fields]
+    fields        ::= "(" { field, "," } field ")"
+    field         ::= TypeId ["?" | "*"] [id]
+    id            ::= TypeId | ConstructorId
 
 References
 ----------
@@ -52,6 +52,9 @@ else:
         """Placeholder for ``typing.TypeAlias``."""
 
         __module__ = "typing"
+
+
+_empty: Any = object()
 
 
 # ============================================================================
@@ -192,8 +195,8 @@ def tokenize(source: str) -> Generator[Token]:
 # "meta-AST". ASDL files (such as Python.asdl) describe the AST structure used
 # by a programming language. But ASDL files themselves need to be parsed. This
 # module parses ASDL files and uses a simple AST to represent them. See the
-# EBNF at the top of the file to understand the logical connection between the
-# various node types.
+# grammar at the top of the file to understand the logical connection between
+# the various node types.
 # ============================================================================
 
 
@@ -208,15 +211,15 @@ class AST:
 
 
 class Module(AST):
-    __match_args__ = __slots__ = _fields = ("name", "dfns")
+    __slots__ = __match_args__ = _fields = ("name", "dfns")
 
-    def __init__(self, name: str, dfns: list[Type] = ...):
+    def __init__(self, name: str, dfns: list[Type] = _empty):
         self.name = name
-        self.dfns = dfns if (dfns is not ...) else []
+        self.dfns = dfns if (dfns is not _empty) else []
 
 
 class Type(AST):
-    __match_args__ = __slots__ = _fields = ("name", "value")
+    __slots__ = __match_args__ = _fields = ("name", "value")
 
     def __init__(self, name: str, value: Union[Product, Sum]):
         self.name = name
@@ -224,31 +227,31 @@ class Type(AST):
 
 
 class Sum(AST):
-    __match_args__ = __slots__ = _fields = ("types", "attributes")
+    __slots__ = __match_args__ = _fields = ("types", "attributes")
 
-    def __init__(self, types: list[Constructor] = ..., attributes: list[Field] = ...):
-        self.types = types if (types is not ...) else []
-        self.attributes = attributes if (attributes is not ...) else []
+    def __init__(self, types: list[Constructor] = _empty, attributes: list[Field] = _empty):
+        self.types = types if (types is not _empty) else []
+        self.attributes = attributes if (attributes is not _empty) else []
 
 
 class Product(AST):
-    __match_args__ = __slots__ = _fields = ("fields", "attributes")
+    __slots__ = __match_args__ = _fields = ("fields", "attributes")
 
-    def __init__(self, fields: list[Field] = ..., attributes: list[Field] = ...):
-        self.fields = fields if (fields is not ...) else []
-        self.attributes = attributes if (attributes is not ...) else []
+    def __init__(self, fields: list[Field] = _empty, attributes: list[Field] = _empty):
+        self.fields = fields if (fields is not _empty) else []
+        self.attributes = attributes if (attributes is not _empty) else []
 
 
 class Constructor(AST):
-    __match_args__ = __slots__ = _fields = ("name", "fields")
+    __slots__ = __match_args__ = _fields = ("name", "fields")
 
-    def __init__(self, name: str, fields: list[Field] = ...):
+    def __init__(self, name: str, fields: list[Field] = _empty):
         self.name = name
-        self.fields = fields if (fields is not ...) else []
+        self.fields = fields if (fields is not _empty) else []
 
 
 class Field(AST):
-    __match_args__ = __slots__ = _fields = ("type", "name", "quantifier")
+    __slots__ = __match_args__ = _fields = ("type", "name", "quantifier")
 
     def __init__(
         self,
@@ -368,8 +371,6 @@ class NodeVisitor:
 #
 # A parser for ASDL definition files. It reads in an ASDL description and
 # parses it into an AST that describes it.
-#
-# TODO: For fun, make this iterative with generators instead of recursive.
 # ============================================================================
 
 
@@ -379,30 +380,50 @@ TOKEN_TO_FIELD_QUANTIFIER = {
 }
 
 
+# TODO: For fun, switch from recursive to iterative via generators and maybe a trampoline.
 class ASDLParser:
-    """Parser for ASDL files.
+    """Parser for ASDL descriptions.
 
-    This is a simple recursive descent parser that acts on an iteratable of tokens.
+    This is a simple recursive descent parser that acts on an iterable of tokens.
     """
 
-    _id_kinds = (TokenKind.CONSTRUCTOR_ID, TokenKind.TYPE_ID)
-
-    cur_token: Optional[Token]
-
     def __init__(self):
-        self._tokenizer: Iterator[Token] = None
-        self.cur_token = None
+        # NOTE: Using _empty like this is hacky.
+        self._tokenizer: Iterator[Token] = _empty
+        self.cur_token: Token = _empty
+
+    def parse(self, tokens: Iterable[Token]) -> Module:
+        """Parse the ASDL token stream and return an AST with a Module root."""
+
+        self._tokenizer = iter(tokens)
+        self.cur_token = next(self._tokenizer)  # Prime the current token.
+
+        return self.parse_module()
 
     # region ---- Parsing helpers -----
 
-    def _advance(self) -> Optional[str]:
+    def advance(self) -> str:
         """Return the value of the current token and read the next one into self.cur_token."""
 
-        cur_val = None if (self.cur_token is None) else self.cur_token.value
-        self.cur_token = next(self._tokenizer, None)
+        cur_val = self.cur_token.value
+        self.cur_token = next(self._tokenizer, _empty)  # A default here prevents the last token from causing an error.
         return cur_val
 
-    def _match(self, kind: Union[TokenKind, tuple[TokenKind, ...]]) -> str:
+    def at_kind(self, kind: Union[TokenKind, tuple[TokenKind, ...]], /) -> bool:
+        if isinstance(kind, tuple):
+            return self.cur_token.kind in kind
+        else:
+            return self.cur_token.kind is kind
+
+    def at_keyword(self, keyword: str, /) -> bool:
+        """Check if the current token is an identifier and matches the given keyword.
+
+        It does not advance to the next token.
+        """
+
+        return self.cur_token.kind is TokenKind.TYPE_ID and self.cur_token.value == keyword
+
+    def match(self, kind: Union[TokenKind, tuple[TokenKind, ...]], /) -> str:
         """The 'match' primitive of RD parsers.
 
         *   Verifies that the current token is of the given kind (kind can be a tuple, in which the kind must match one
@@ -411,102 +432,104 @@ class ASDLParser:
         *   Reads in the next token
         """
 
-        if (isinstance(kind, tuple) and self.cur_token.kind in kind) or self.cur_token.kind is kind:
+        if self.at_kind(kind):
             value = self.cur_token.value
-            self._advance()
+            self.advance()
             return value
         else:
             msg = f"Unmatched {kind} (found {self.cur_token.kind})"
             raise ASDLSyntaxError(msg, self.cur_token.lineno)
 
-    def _at_keyword(self, keyword: str) -> bool:
-        """Check if the current token is an identifier and matches the given keyword.
-
-        It does not advance to the next token.
-        """
-
-        return self.cur_token.kind == TokenKind.TYPE_ID and self.cur_token.value == keyword
-
     # endregion
 
     # region ---- Parsing rules ----
 
-    def parse(self, tokens: Iterable[Token]) -> Module:
-        """Parse the ASDL token stream and return an AST with a Module root."""
-
-        self._tokenizer = iter(tokens)
-        self._advance()
-        return self.parse_module()
+    # Rule: id ::= TypeId | ConstructorId
+    ID_KINDS = (TokenKind.TYPE_ID, TokenKind.CONSTRUCTOR_ID)
 
     def parse_module(self) -> Module:
-        if not self._at_keyword("module"):
+        # Rule: module ::= "module" id "{" [definitions] "}"
+
+        if not self.at_keyword("module"):
             msg = f'Expected "module" (found {self.cur_token.value})'
             raise ASDLSyntaxError(msg, self.cur_token.lineno)
 
-        self._advance()
-        name = self._match(self._id_kinds)
-        self._match(TokenKind.LBRACE)
+        self.advance()
+        name = self.match(self.ID_KINDS)
+        self.match(TokenKind.LBRACE)
         defs = self.parse_definitions()
-        self._match(TokenKind.RBRACE)
+        self.match(TokenKind.RBRACE)
         return Module(name, defs)
 
     def parse_definitions(self) -> list[Type]:
+        # Rule: definitions ::= { TypeId "=" type }
+
         defs: list[Type] = []
 
-        while self.cur_token.kind is TokenKind.TYPE_ID:
-            typename = self._advance()
-            self._match(TokenKind.EQUALS)
+        while self.at_kind(TokenKind.TYPE_ID):
+            typename = self.advance()
+            self.match(TokenKind.EQUALS)
             type_ = self.parse_type()
             defs.append(Type(typename, type_))
 
         return defs
 
     def parse_type(self) -> Union[Product, Sum]:
-        if self.cur_token.kind is TokenKind.LPAREN:
-            # If we see a "(", it's a product
+        # Rule: type ::= product | sum
+
+        if self.at_kind(TokenKind.LPAREN):
             return self.parse_product()
         else:
-            # Otherwise, it's a sum.
             return self.parse_sum()
 
-    def parse_sum(self) -> Sum:
-        # Look for ConstructorId.
-        sumlist = [Constructor(self._match(TokenKind.CONSTRUCTOR_ID), self.parse_optional_fields())]
-        while self.cur_token.kind is TokenKind.PIPE:
-            # More constructors
-            self._advance()
-            sumlist.append(Constructor(self._match(TokenKind.CONSTRUCTOR_ID), self.parse_optional_fields()))
-        return Sum(sumlist, self.parse_optional_attributes())
-
     def parse_product(self) -> Product:
+        # Rule: product ::= fields ["attributes" fields]
+
         return Product(self.parse_fields(), self.parse_optional_attributes())
 
+    def parse_sum(self) -> Sum:
+        # Rule: sum           ::= constructor { "|" constructor } ["attributes" fields]
+        # Rule: constructor   ::= ConstructorId [fields]
+
+        sumlist = [Constructor(self.match(TokenKind.CONSTRUCTOR_ID), self.parse_optional_fields())]
+        while self.at_kind(TokenKind.PIPE):
+            # More constructors
+            self.advance()
+            sumlist.append(Constructor(self.match(TokenKind.CONSTRUCTOR_ID), self.parse_optional_fields()))
+        return Sum(sumlist, self.parse_optional_attributes())
+
     def parse_fields(self) -> list[Field]:
+        # Rule: fields  ::= "(" { field, "," } field ")"
+        # Rule: field   ::= TypeId ["?" | "*"] [id]
+
         fields: list[Field] = []
-        self._match(TokenKind.LPAREN)
+        self.match(TokenKind.LPAREN)
 
-        while self.cur_token.kind is TokenKind.TYPE_ID:
-            typename = self._advance()
+        while self.at_kind(TokenKind.TYPE_ID):
+            typename = self.advance()
             field_quantifier = self.parse_optional_field_quantifier()
-            id_ = self._advance() if self.cur_token.kind in self._id_kinds else None
-            fields.append(Field(typename, id_, field_quantifier))
-            if self.cur_token.kind is TokenKind.RPAREN:
-                break
-            elif self.cur_token.kind is TokenKind.COMMA:
-                self._advance()
+            id_ = self.advance() if self.at_kind(self.ID_KINDS) else None
 
-        self._match(TokenKind.RPAREN)
+            fields.append(Field(typename, id_, field_quantifier))
+
+            if self.at_kind(TokenKind.RPAREN):
+                break
+
+            elif self.at_kind(TokenKind.COMMA):
+                self.advance()
+
+        self.match(TokenKind.RPAREN)
         return fields
 
     def parse_optional_fields(self) -> list[Field]:
-        if self.cur_token.kind is TokenKind.LPAREN:
+        if self.at_kind(TokenKind.LPAREN):
             return self.parse_fields()
         else:
             return []
 
     def parse_optional_attributes(self) -> list[Field]:
-        if self._at_keyword("attributes"):
-            self._advance()
+        if self.at_keyword("attributes"):
+            self.advance()
             return self.parse_fields()
         else:
             return []
@@ -514,7 +537,7 @@ class ASDLParser:
     def parse_optional_field_quantifier(self) -> Optional[FieldQuantifier]:
         quantifier = TOKEN_TO_FIELD_QUANTIFIER.get(self.cur_token.kind)
         if quantifier is not None:
-            self._advance()
+            self.advance()
         return quantifier
 
     # endregion
@@ -523,8 +546,7 @@ class ASDLParser:
 def parse(source: str) -> Module:
     """Parse ASDL from the given buffer and return a Module node describing it."""
 
-    parser = ASDLParser()
-    return parser.parse(tokenize(source))
+    return ASDLParser().parse(tokenize(source))
 
 
 # endregion
@@ -533,7 +555,7 @@ def parse(source: str) -> Module:
 # ============================================================================
 # region -------- Code generator --------
 #
-# A generator that takes in a parse tree representing an ASDL description and
+# A visitor that takes in a parse tree representing an ASDL description and
 # outputs Python code.
 # ============================================================================
 
@@ -556,35 +578,34 @@ class Checker(NodeVisitor):
     constructors: dict[str, str]
     types: dict[str, list[str]]
     error_messages: list[str]
-    parent_type_name: str
 
     def __init__(self):
         super().__init__()
         self.constructors = {}
         self.types = {}
         self.error_messages = []
-        self.parent_type_name = ""
+        self._parent_type_name: str = ""
 
     def visit_Type(self, node: Type) -> _ASTGen:
-        self.parent_type_name = node.name
+        self._parent_type_name = node.name
         return self.generic_visit(node)
 
     def visit_Constructor(self, node: Constructor) -> _ASTGen:
-        parent_name = self.parent_type_name
-        self.parent_type_name = node.name
+        parent_name = self._parent_type_name
+        self._parent_type_name = node.name
 
         try:
-            conflict = self.constructors[self.parent_type_name]
+            conflict = self.constructors[self._parent_type_name]
         except KeyError:
-            self.constructors[self.parent_type_name] = parent_name
+            self.constructors[self._parent_type_name] = parent_name
         else:
-            self.error_messages.append(f"Redefinition of constructor {self.parent_type_name}")
+            self.error_messages.append(f"Redefinition of constructor {self._parent_type_name}")
             self.error_messages.append(f"Defined in {conflict} and {parent_name}")
 
         return self.generic_visit(node)
 
     def visit_Field(self, field: Field) -> None:
-        self.types.setdefault(field.type, []).append(self.parent_type_name)
+        self.types.setdefault(field.type, []).append(self._parent_type_name)
 
 
 def check_tree(mod: Module) -> None:
@@ -629,8 +650,8 @@ class PythonCodeGenerator(NodeVisitor):
     def __init__(self):
         self.buffer = StringIO()
 
-        self.parent_type_name: str = ""
-        self.parent_type_attributes: _AttributeStatements | None = None
+        self._parent_type_name: str = ""
+        self._parent_type_attributes: _AttributeStatements | None = None
 
     def __enter__(self):
         return self
@@ -691,7 +712,7 @@ class PythonCodeGenerator(NodeVisitor):
         return super().visit(node)
 
     def visit_Type(self, node: Type) -> _ASTGen:
-        self.parent_type_name = node.name
+        self._parent_type_name = node.name
         return self.generic_visit(node)
 
     @staticmethod
@@ -728,7 +749,7 @@ class PythonCodeGenerator(NodeVisitor):
 
         # Construct the sum class.
         self.writelines(
-            f"class {self.parent_type_name}(AST):",
+            f"class {self._parent_type_name}(AST):",
             "    __match_args__ = ()",
             "    _fields = ()",
             "",
@@ -736,17 +757,14 @@ class PythonCodeGenerator(NodeVisitor):
 
         # Only construct an __init__ if it's going to do something.
         if len(init_params) > 1 or init_body:
-            sig = ", ".join(init_params)
-            self.write(f"    def __init__({sig}) -> None:")
-
+            self.write(f'    def __init__({", ".join(init_params)}) -> None:')
             for body_stmt in init_body:
                 self.write(f"        {body_stmt}")
-
             self.write()
 
         self.write()
 
-        self.parent_type_attributes = saved_attributes
+        self._parent_type_attributes = saved_attributes
         return self.generic_visit(node)
 
     def visit_Product(self, node: Product) -> _ASTGen:
@@ -779,7 +797,7 @@ class PythonCodeGenerator(NodeVisitor):
 
         # Construct the product class.
         self.writelines(
-            f"class {self.parent_type_name}(AST):",
+            f"class {self._parent_type_name}(AST):",
             f"    __match_args__ = ({match_args_and_fields})",
             f"    _fields = ({match_args_and_fields})",
             "",
@@ -787,17 +805,14 @@ class PythonCodeGenerator(NodeVisitor):
 
         # Only construct an __init__ if it's going to do something.
         if len(init_params) > 1 or init_body:
-            sig = ", ".join(init_params)
-            self.write(f"    def __init__({sig}) -> None:")
-
+            self.write(f'    def __init__({", ".join(init_params)}) -> None:')
             for body_stmt in init_body:
                 self.write(f"        {body_stmt}")
-
             self.write()
 
         self.write()
 
-        self.parent_type_attributes = saved_attributes
+        self._parent_type_attributes = saved_attributes
         return self.generic_visit(node)
 
     def visit_Constructor(self, node: Constructor) -> None:
@@ -811,15 +826,15 @@ class PythonCodeGenerator(NodeVisitor):
                 init_params.append(self._build_init_param_from_field(field))
                 init_body.append(f"self.{field.name} = {field.name}")
 
-        if self.parent_type_attributes:
-            init_params.extend(self.parent_type_attributes.init_params)
-            init_body.extend(self.parent_type_attributes.init_body_stmts)
+        if self._parent_type_attributes:
+            init_params.extend(self._parent_type_attributes.init_params)
+            init_body.extend(self._parent_type_attributes.init_body_stmts)
 
         match_args_and_fields = ", ".join(match_args_and_field_names)
 
         # Construct the concrete class.
         self.writelines(
-            f"class {node.name}({self.parent_type_name}):",
+            f"class {node.name}({self._parent_type_name}):",
             f"    __match_args__ = ({match_args_and_fields})",
             f"    _fields = ({match_args_and_fields})",
             "",
@@ -827,12 +842,9 @@ class PythonCodeGenerator(NodeVisitor):
 
         # Only construct an __init__ if it's going to do something.
         if len(init_params) > 1 or init_body:
-            sig = ", ".join(init_params)
-            self.write(f"    def __init__({sig}) -> None:")
-
+            self.write(f'    def __init__({", ".join(init_params)}) -> None:')
             for body_stmt in init_body:
                 self.write(f"        {body_stmt}")
-
             self.write()
 
         self.write()

@@ -31,8 +31,8 @@ class TimeCatcher:
 
 def main() -> None:
     example_dir = pathlib.Path("examples/cpython")
-    input_path = example_dir / "Python.asdl"
-    output_path = example_dir / "Python_ast.py"
+    input_path = example_dir / "Python314.asdl"
+    output_path = example_dir / "Python314_ast.py"
 
     source = input_path.read_text("utf-8")
 
